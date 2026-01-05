@@ -146,6 +146,19 @@ cron.schedule(
   { timezone: "Asia/Karachi" }
 );
 
+// =====================================
+// AUTO CLEANUP OLD BACKUPS (60 DAYS)
+// =====================================
+app.get("/api/cleanup-backups", async (req, res) => {
+  try {
+    const result = await cleanupOldBackups();
+    res.json({ success: true, result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 // =====================================================================
 // STOCK SNAPSHOT SQL
 // =====================================================================
