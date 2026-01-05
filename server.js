@@ -3,13 +3,13 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const cron = require("node-cron");
+const { Client } = require("pg");
 
 const doBackup = require("./backup");
 const listmlbackups = require("./listmlbackups");
 const restoreFromBucket = require("./restoreFromBucket");
+const cleanupOldBackups = require("./cleanupOldBackups");
 const supabase = require("./db");
-
-const { Client } = require("pg");
 
 // --------------------------------------
 // PostgreSQL Connection
@@ -50,19 +50,19 @@ app.get("/", (req, res) => res.json({ ok: true }));
 // BACKUP SYSTEM
 // =====================================================================
 
-// POST backup trigger
+// 🔹 POST backup trigger
 app.post("/api/backup", async (req, res) => {
   const result = await doBackup();
   res.json(result);
 });
 
-// GET backup trigger (for cron-job.org)
+// 🔹 GET backup trigger (cron-job.org)
 app.get("/api/backup", async (req, res) => {
   const result = await doBackup();
   res.json(result);
 });
 
-// List backups
+// 🔹 List backups
 app.get("/api/list-backups", async (req, res) => {
   try {
     const files = await listmlbackups();
@@ -72,7 +72,7 @@ app.get("/api/list-backups", async (req, res) => {
   }
 });
 
-// Restore from bucket
+// 🔹 Restore from bucket
 app.post("/api/restore-from-bucket", upload.any(), async (req, res) => {
   try {
     const result = await restoreFromBucket({ body: req.body });
@@ -82,33 +82,38 @@ app.post("/api/restore-from-bucket", upload.any(), async (req, res) => {
   }
 });
 
-// Download backup
+// 🔹 Download backup
 app.get("/api/download-backup/:name", async (req, res) => {
   try {
-    const name = req.params.name;
     const { data, error } = await supabase.storage
       .from("mlbackups")
-      .download(name);
+      .download(req.params.name);
 
     if (error || !data) return res.status(404).send("File not found");
 
     const buffer = Buffer.from(await data.arrayBuffer());
     res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${req.params.name}"`
+    );
     res.send(buffer);
   } catch {
     res.status(500).send("Download failed");
   }
 });
 
-// Delete backup
+// 🔹 Delete backup (manual)
 app.post("/api/delete-backup", async (req, res) => {
   try {
     const { fileName, password } = req.body;
     if (password !== "faizanyounus")
       return res.json({ success: false, error: "Invalid password" });
 
-    const { error } = await supabase.storage.from("mlbackups").remove([fileName]);
+    const { error } = await supabase.storage
+      .from("mlbackups")
+      .remove([fileName]);
+
     if (error) return res.json({ success: false, error: error.message });
 
     res.json({ success: true });
@@ -117,67 +122,89 @@ app.post("/api/delete-backup", async (req, res) => {
   }
 });
 
-// Auto backup at 2AM Pakistan time
-cron.schedule("0 2 * * *", () => {
-  console.log("⏰ Auto Backup Running...");
-  doBackup();
-}, { timezone: "Asia/Karachi" });
+// =====================================================================
+// ⏰ CRON JOBS
+// =====================================================================
+
+// 🔹 Auto Backup – Daily 2AM Pakistan Time
+cron.schedule(
+  "0 2 * * *",
+  async () => {
+    console.log("⏰ Auto Backup Running...");
+    await doBackup();
+  },
+  { timezone: "Asia/Karachi" }
+);
+
+// 🔹 Auto Cleanup – Daily 3AM (60 days old backups)
+cron.schedule(
+  "0 3 * * *",
+  async () => {
+    console.log("🧹 Cleanup Old Backups...");
+    await cleanupOldBackups();
+  },
+  { timezone: "Asia/Karachi" }
+);
 
 // =====================================================================
 // STOCK SNAPSHOT SQL
 // =====================================================================
 const STOCK_SNAPSHOT_SQL = `
 WITH last_snap AS (
-    SELECT MAX(snap_date) AS snap_date
-    FROM stock_snapshots
-    WHERE snap_date <= $1
+  SELECT MAX(snap_date) AS snap_date
+  FROM stock_snapshots
+  WHERE snap_date <= $1
 ),
 base AS (
-    SELECT 
-        i.barcode::text AS barcode,
-        i.item_name,
-        COALESCE(s.stock_qty, 0) AS base_qty
-    FROM items i
-    LEFT JOIN stock_snapshots s
-      ON s.barcode::text = i.barcode::text
-     AND s.snap_date = (SELECT snap_date FROM last_snap)
+  SELECT 
+    i.barcode::text AS barcode,
+    i.item_name,
+    COALESCE(s.stock_qty, 0) AS base_qty
+  FROM items i
+  LEFT JOIN stock_snapshots s
+    ON s.barcode::text = i.barcode::text
+   AND s.snap_date = (SELECT snap_date FROM last_snap)
 ),
 pur AS (
-    SELECT barcode::text AS barcode, SUM(qty) AS total_purchase
-    FROM purchases, last_snap
-    WHERE purchase_date > COALESCE(last_snap.snap_date,'1900-01-01')
-      AND purchase_date <= $1
-      AND is_deleted = FALSE
-    GROUP BY barcode::text
+  SELECT barcode::text, SUM(qty) total_purchase
+  FROM purchases, last_snap
+  WHERE purchase_date > COALESCE(last_snap.snap_date,'1900-01-01')
+    AND purchase_date <= $1
+    AND is_deleted = FALSE
+  GROUP BY barcode::text
 ),
 sal AS (
-    SELECT barcode::text AS barcode, SUM(qty) AS total_sale
-    FROM sales, last_snap
-    WHERE sale_date > COALESCE(last_snap.snap_date,'1900-01-01')
-      AND sale_date <= $1
-      AND is_deleted = FALSE
-    GROUP BY barcode::text
+  SELECT barcode::text, SUM(qty) total_sale
+  FROM sales, last_snap
+  WHERE sale_date > COALESCE(last_snap.snap_date,'1900-01-01')
+    AND sale_date <= $1
+    AND is_deleted = FALSE
+  GROUP BY barcode::text
 ),
 ret AS (
-    SELECT barcode::text AS barcode, SUM(return_qty) AS total_return
-    FROM sale_returns, last_snap
-    WHERE created_at::date > COALESCE(last_snap.snap_date,'1900-01-01')
-      AND created_at::date <= $1
-    GROUP BY barcode::text
+  SELECT barcode::text, SUM(return_qty) total_return
+  FROM sale_returns, last_snap
+  WHERE created_at::date > COALESCE(last_snap.snap_date,'1900-01-01')
+    AND created_at::date <= $1
+  GROUP BY barcode::text
 )
 SELECT 
-    b.barcode,
-    b.item_name,
-    b.base_qty
-      + COALESCE(pur.total_purchase,0)
-      - COALESCE(sal.total_sale,0)
-      + COALESCE(ret.total_return,0)
-    AS stock_qty
+  b.barcode,
+  b.item_name,
+  b.base_qty
+  + COALESCE(pur.total_purchase,0)
+  - COALESCE(sal.total_sale,0)
+  + COALESCE(ret.total_return,0) AS stock_qty
 FROM base b
 LEFT JOIN pur ON pur.barcode = b.barcode
 LEFT JOIN sal ON sal.barcode = b.barcode
 LEFT JOIN ret ON ret.barcode = b.barcode
 `;
+
+// =====================================================================
+// باقی snapshot / stock / archive APIs
+// 👉 تمہارا code یہاں بالکل SAFE ہے، کوئی change نہیں کیا
+// =====================================================================
 
 // =====================================================================
 // SNAPSHOT PREVIEW
@@ -379,60 +406,6 @@ app.post("/api/archive-delete", async (req, res) => {
     res.json({ success: false, error: err.message });
   }
 });
-
-// cleanupOldBackups.js
-const supabase = require("./db");
-const dayjs = require("dayjs");
-
-module.exports = async function cleanupOldBackups() {
-  try {
-    // 🔹 List all files
-    const { data, error } = await supabase.storage
-      .from("mlbackups")
-      .list("", { limit: 1000 });
-
-    if (error) {
-      console.error("❌ List error:", error.message);
-      return { success: false };
-    }
-
-    const now = dayjs();
-    const filesToDelete = [];
-
-    data.forEach((file) => {
-      if (!file.created_at) return;
-
-      const fileDate = dayjs(file.created_at);
-      const diffDays = now.diff(fileDate, "day");
-
-      // 🔥 60 days old
-      if (diffDays > 60) {
-        filesToDelete.push(file.name);
-      }
-    });
-
-    if (filesToDelete.length === 0) {
-      console.log("✅ No old backups to delete");
-      return { success: true, deleted: 0 };
-    }
-
-    const { error: delError } = await supabase.storage
-      .from("mlbackups")
-      .remove(filesToDelete);
-
-    if (delError) {
-      console.error("❌ Delete error:", delError.message);
-      return { success: false };
-    }
-
-    console.log(`🗑️ Deleted ${filesToDelete.length} old backups`);
-    return { success: true, deleted: filesToDelete.length };
-
-  } catch (err) {
-    console.error("❌ Cleanup failed:", err.message);
-    return { success: false };
-  }
-};
 
 
 module.exports = app;
