@@ -1,4 +1,3 @@
-// server.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -27,7 +26,7 @@ pg.connect()
 const app = express();
 
 // =====================================================
-// 🔥 SUPER CORS FIX (KOYEB + LOCALHOST)
+// 🔥 SUPER CORS FIX
 // =====================================================
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -50,12 +49,20 @@ app.get("/", (req, res) => res.json({ ok: true }));
 // =====================================================================
 // BACKUP SYSTEM
 // =====================================================================
+
+// POST backup trigger
 app.post("/api/backup", async (req, res) => {
   const result = await doBackup();
   res.json(result);
 });
 
-// ✅ Fixed route name for frontend
+// GET backup trigger (for cron-job.org)
+app.get("/api/backup", async (req, res) => {
+  const result = await doBackup();
+  res.json(result);
+});
+
+// List backups
 app.get("/api/list-backups", async (req, res) => {
   try {
     const files = await listmlbackups();
@@ -65,6 +72,7 @@ app.get("/api/list-backups", async (req, res) => {
   }
 });
 
+// Restore from bucket
 app.post("/api/restore-from-bucket", upload.any(), async (req, res) => {
   try {
     const result = await restoreFromBucket({ body: req.body });
@@ -78,7 +86,6 @@ app.post("/api/restore-from-bucket", upload.any(), async (req, res) => {
 app.get("/api/download-backup/:name", async (req, res) => {
   try {
     const name = req.params.name;
-
     const { data, error } = await supabase.storage
       .from("mlbackups")
       .download(name);
@@ -86,10 +93,8 @@ app.get("/api/download-backup/:name", async (req, res) => {
     if (error || !data) return res.status(404).send("File not found");
 
     const buffer = Buffer.from(await data.arrayBuffer());
-
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
-
     res.send(buffer);
   } catch {
     res.status(500).send("Download failed");
@@ -100,14 +105,10 @@ app.get("/api/download-backup/:name", async (req, res) => {
 app.post("/api/delete-backup", async (req, res) => {
   try {
     const { fileName, password } = req.body;
-
     if (password !== "faizanyounus")
       return res.json({ success: false, error: "Invalid password" });
 
-    const { error } = await supabase.storage
-      .from("mlbackups")
-      .remove([fileName]);
-
+    const { error } = await supabase.storage.from("mlbackups").remove([fileName]);
     if (error) return res.json({ success: false, error: error.message });
 
     res.json({ success: true });
@@ -116,7 +117,7 @@ app.post("/api/delete-backup", async (req, res) => {
   }
 });
 
-// Auto backup at 2AM
+// Auto backup at 2AM Pakistan time
 cron.schedule("0 2 * * *", () => {
   console.log("⏰ Auto Backup Running...");
   doBackup();
@@ -184,7 +185,6 @@ LEFT JOIN ret ON ret.barcode = b.barcode
 app.post("/api/snapshot-preview", async (req, res) => {
   try {
     const { end_date } = req.body;
-
     if (!end_date)
       return res.json({ success: false, error: "End date is required" });
 
@@ -196,10 +196,8 @@ app.post("/api/snapshot-preview", async (req, res) => {
       FROM (${STOCK_SNAPSHOT_SQL}) q
       WHERE q.stock_qty <> 0
     `;
-
     const result = await pg.query(sql, [end_date]);
     res.json({ success: true, rows: result.rows });
-
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -211,10 +209,8 @@ app.post("/api/snapshot-preview", async (req, res) => {
 app.post("/api/snapshot-create", async (req, res) => {
   try {
     const { start_date, end_date, password } = req.body;
-
     if (password !== "faizanyounus2122")
       return res.json({ success: false, error: "Wrong password" });
-
     if (!end_date)
       return res.json({ success: false, error: "End date is required" });
 
@@ -228,7 +224,6 @@ app.post("/api/snapshot-create", async (req, res) => {
       FROM (${STOCK_SNAPSHOT_SQL}) q
       WHERE q.stock_qty <> 0;
     `;
-
     const result = await pg.query(sqlInsert, [end_date]);
 
     await pg.query(
@@ -237,12 +232,7 @@ app.post("/api/snapshot-create", async (req, res) => {
       [start_date, end_date, result.rowCount]
     );
 
-    res.json({
-      success: true,
-      message: "Snapshot created!",
-      inserted: result.rowCount,
-    });
-
+    res.json({ success: true, message: "Snapshot created!", inserted: result.rowCount });
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -258,9 +248,7 @@ app.get("/api/snapshot-history", async (req, res) => {
       FROM snapshot_logs
       ORDER BY id DESC
     `);
-
     res.json({ success: true, rows: result.rows });
-
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -290,11 +278,7 @@ app.get("/api/stock-report", async (req, res) => {
 
     let map = {};
     base.rows.forEach(r => {
-      map[r.barcode] = {
-        barcode: r.barcode,
-        item_name: r.item_name,
-        stock_qty: Number(r.qty)
-      };
+      map[r.barcode] = { barcode: r.barcode, item_name: r.item_name, stock_qty: Number(r.qty) };
     });
 
     const pur = await pg.query(`
@@ -305,9 +289,7 @@ app.get("/api/stock-report", async (req, res) => {
     `, [baseDate]);
 
     pur.rows.forEach(r => {
-      if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      }
+      if (!map[r.barcode]) map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty += Number(r.qty);
     });
@@ -320,9 +302,7 @@ app.get("/api/stock-report", async (req, res) => {
     `, [baseDate]);
 
     sal.rows.forEach(r => {
-      if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      }
+      if (!map[r.barcode]) map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty -= Number(r.qty);
     });
@@ -335,16 +315,13 @@ app.get("/api/stock-report", async (req, res) => {
     `, [baseDate]);
 
     ret.rows.forEach(r => {
-      if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      }
+      if (!map[r.barcode]) map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty += Number(r.qty);
     });
 
     const final = Object.values(map).filter(r => r.stock_qty !== 0);
     res.json({ success: true, rows: final });
-
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -380,10 +357,8 @@ app.post("/api/archive-preview", async (req, res) => {
       GROUP BY barcode, item_name
       ORDER BY barcode;
     `;
-
     const result = await pg.query(sql, [start_date, end_date]);
     res.json({ success: true, rows: result.rows });
-
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -392,7 +367,6 @@ app.post("/api/archive-preview", async (req, res) => {
 app.post("/api/archive-delete", async (req, res) => {
   try {
     const { start_date, end_date, password } = req.body;
-
     if (password !== "faizanyounus2122")
       return res.json({ success: false, error: "Wrong password" });
 
@@ -401,7 +375,6 @@ app.post("/api/archive-delete", async (req, res) => {
     await pg.query(`DELETE FROM sale_returns WHERE created_at::date BETWEEN $1 AND $2`, [start_date, end_date]);
 
     res.json({ success: true, message: "Data Deleted Successfully!" });
-
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
