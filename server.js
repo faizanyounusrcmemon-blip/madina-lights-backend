@@ -9,6 +9,7 @@ const doBackup = require("./backup");
 const listmlbackups = require("./listmlbackups");
 const restoreFromBucket = require("./restoreFromBucket");
 const cleanupOldBackups = require("./cleanupOldBackups");
+const pingDatabase = require("./ping");
 const supabase = require("./db");
 
 // --------------------------------------
@@ -157,6 +158,19 @@ app.get("/api/cleanup-backups", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// =====================================
+// KEEP ALIVE PING (FREE PLAN FIX)
+// =====================================
+app.get("/api/ping", async (req, res) => {
+  try {
+    const result = await pingDatabase();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 
 // =====================================================================
