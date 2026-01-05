@@ -55,9 +55,14 @@ app.post("/api/backup", async (req, res) => {
   res.json(result);
 });
 
-app.get("/api/list-mlbackups", async (req, res) => {
-  const files = await listmlbackups();
-  res.json({ success: true, files });
+// ✅ Fixed route name for frontend
+app.get("/api/list-backups", async (req, res) => {
+  try {
+    const files = await listmlbackups();
+    res.json({ success: true, files });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
 });
 
 app.post("/api/restore-from-bucket", upload.any(), async (req, res) => {
@@ -117,19 +122,15 @@ cron.schedule("0 2 * * *", () => {
   doBackup();
 }, { timezone: "Asia/Karachi" });
 
-
 // =====================================================================
-// ⭐ NEW — SNAPSHOT SYSTEM WITH BASE SNAPSHOT
+// STOCK SNAPSHOT SQL
 // =====================================================================
-
-// NEW Correct SQL (with base snapshot logic)
 const STOCK_SNAPSHOT_SQL = `
 WITH last_snap AS (
     SELECT MAX(snap_date) AS snap_date
     FROM stock_snapshots
     WHERE snap_date <= $1
 ),
-
 base AS (
     SELECT 
         i.barcode::text AS barcode,
@@ -140,7 +141,6 @@ base AS (
       ON s.barcode::text = i.barcode::text
      AND s.snap_date = (SELECT snap_date FROM last_snap)
 ),
-
 pur AS (
     SELECT barcode::text AS barcode, SUM(qty) AS total_purchase
     FROM purchases, last_snap
@@ -149,7 +149,6 @@ pur AS (
       AND is_deleted = FALSE
     GROUP BY barcode::text
 ),
-
 sal AS (
     SELECT barcode::text AS barcode, SUM(qty) AS total_sale
     FROM sales, last_snap
@@ -158,7 +157,6 @@ sal AS (
       AND is_deleted = FALSE
     GROUP BY barcode::text
 ),
-
 ret AS (
     SELECT barcode::text AS barcode, SUM(return_qty) AS total_return
     FROM sale_returns, last_snap
@@ -166,7 +164,6 @@ ret AS (
       AND created_at::date <= $1
     GROUP BY barcode::text
 )
-
 SELECT 
     b.barcode,
     b.item_name,
@@ -184,9 +181,6 @@ LEFT JOIN ret ON ret.barcode = b.barcode
 // =====================================================================
 // SNAPSHOT PREVIEW
 // =====================================================================
-// =====================================================================
-// ⭐ FINAL SNAPSHOT PREVIEW (uses full base snapshot SQL)
-// =====================================================================
 app.post("/api/snapshot-preview", async (req, res) => {
   try {
     const { end_date } = req.body;
@@ -194,7 +188,6 @@ app.post("/api/snapshot-preview", async (req, res) => {
     if (!end_date)
       return res.json({ success: false, error: "End date is required" });
 
-    // run STOCK_SNAPSHOT_SQL (but do NOT insert into table)
     const sql = `
       SELECT 
         q.barcode,
@@ -205,14 +198,12 @@ app.post("/api/snapshot-preview", async (req, res) => {
     `;
 
     const result = await pg.query(sql, [end_date]);
-
     res.json({ success: true, rows: result.rows });
 
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
 });
-
 
 // =====================================================================
 // SNAPSHOT CREATE + LOG
@@ -276,11 +267,10 @@ app.get("/api/snapshot-history", async (req, res) => {
 });
 
 // =====================================================================
-// STOCK REPORT (Snapshot + Live Movements)  **FIXED VERSION**
+// STOCK REPORT
 // =====================================================================
 app.get("/api/stock-report", async (req, res) => {
   try {
-    // 1) Last Snapshot
     const lastSnapRes = await pg.query(`
       SELECT snap_date 
       FROM stock_snapshots
@@ -291,7 +281,6 @@ app.get("/api/stock-report", async (req, res) => {
     let baseDate = "1900-01-01";
     if (lastSnapRes.rows.length > 0) baseDate = lastSnapRes.rows[0].snap_date;
 
-    // 2) Base from snapshot
     const base = await pg.query(`
       SELECT barcode::text, item_name, SUM(stock_qty) AS qty
       FROM stock_snapshots
@@ -308,9 +297,6 @@ app.get("/api/stock-report", async (req, res) => {
       };
     });
 
-    // --------------------------
-    // ⭐ FIX: PURCHASES WITH ITEM NAME
-    // --------------------------
     const pur = await pg.query(`
       SELECT barcode::text, item_name, SUM(qty) AS qty
       FROM purchases
@@ -320,19 +306,12 @@ app.get("/api/stock-report", async (req, res) => {
 
     pur.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = {
-          barcode: r.barcode,
-          item_name: r.item_name ?? "",
-          stock_qty: 0
-        };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       }
       map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty += Number(r.qty);
     });
 
-    // --------------------------
-    // ⭐ FIX: SALES WITH ITEM NAME
-    // --------------------------
     const sal = await pg.query(`
       SELECT barcode::text, item_name, SUM(qty) AS qty
       FROM sales
@@ -342,19 +321,12 @@ app.get("/api/stock-report", async (req, res) => {
 
     sal.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = {
-          barcode: r.barcode,
-          item_name: r.item_name ?? "",
-          stock_qty: 0
-        };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       }
       map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty -= Number(r.qty);
     });
 
-    // --------------------------
-    // ⭐ FIX: RETURNS WITH ITEM NAME
-    // --------------------------
     const ret = await pg.query(`
       SELECT barcode::text, item_name, SUM(return_qty) AS qty
       FROM sale_returns
@@ -364,19 +336,13 @@ app.get("/api/stock-report", async (req, res) => {
 
     ret.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = {
-          barcode: r.barcode,
-          item_name: r.item_name ?? "",
-          stock_qty: 0
-        };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       }
       map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty += Number(r.qty);
     });
 
-    // Remove 0 qty
     const final = Object.values(map).filter(r => r.stock_qty !== 0);
-
     res.json({ success: true, rows: final });
 
   } catch (err) {
@@ -384,12 +350,9 @@ app.get("/api/stock-report", async (req, res) => {
   }
 });
 
-
-
 // =====================================================================
-// ARCHIVE PREVIEW / TRANSFER / DELETE (NO CHANGES)
+// ARCHIVE PREVIEW / DELETE
 // =====================================================================
-
 app.post("/api/archive-preview", async (req, res) => {
   try {
     const { start_date, end_date } = req.body;
@@ -404,18 +367,12 @@ app.post("/api/archive-preview", async (req, res) => {
       FROM (
         SELECT barcode::text, item_name, qty AS purchase_qty, 0 AS sale_qty, 0 AS return_qty
         FROM purchases
-        WHERE is_deleted = FALSE 
-          AND purchase_date BETWEEN $1 AND $2
-
+        WHERE is_deleted = FALSE AND purchase_date BETWEEN $1 AND $2
         UNION ALL
-
         SELECT barcode::text, item_name, 0, qty, 0
         FROM sales
-        WHERE is_deleted = FALSE 
-          AND sale_date BETWEEN $1 AND $2
-
+        WHERE is_deleted = FALSE AND sale_date BETWEEN $1 AND $2
         UNION ALL
-
         SELECT barcode::text, item_name, 0, 0, return_qty
         FROM sale_returns
         WHERE created_at::date BETWEEN $1 AND $2
@@ -432,7 +389,6 @@ app.post("/api/archive-preview", async (req, res) => {
   }
 });
 
-
 app.post("/api/archive-delete", async (req, res) => {
   try {
     const { start_date, end_date, password } = req.body;
@@ -440,20 +396,9 @@ app.post("/api/archive-delete", async (req, res) => {
     if (password !== "faizanyounus2122")
       return res.json({ success: false, error: "Wrong password" });
 
-    await pg.query(
-      `DELETE FROM purchases WHERE purchase_date BETWEEN $1 AND $2`,
-      [start_date, end_date]
-    );
-
-    await pg.query(
-      `DELETE FROM sales WHERE sale_date BETWEEN $1 AND $2`,
-      [start_date, end_date]
-    );
-
-    await pg.query(
-      `DELETE FROM sale_returns WHERE created_at::date BETWEEN $1 AND $2`,
-      [start_date, end_date]
-    );
+    await pg.query(`DELETE FROM purchases WHERE purchase_date BETWEEN $1 AND $2`, [start_date, end_date]);
+    await pg.query(`DELETE FROM sales WHERE sale_date BETWEEN $1 AND $2`, [start_date, end_date]);
+    await pg.query(`DELETE FROM sale_returns WHERE created_at::date BETWEEN $1 AND $2`, [start_date, end_date]);
 
     res.json({ success: true, message: "Data Deleted Successfully!" });
 
@@ -463,5 +408,3 @@ app.post("/api/archive-delete", async (req, res) => {
 });
 
 module.exports = app;
-
-
