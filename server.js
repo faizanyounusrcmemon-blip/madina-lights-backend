@@ -395,18 +395,18 @@ app.get("/api/stock-report", async (req, res) => {
     });
 
     // ===============================
-    // Fetch rate from items table
+    // Fetch purchase_price from items table
     // ===============================
     const barcodes = Object.keys(map);
     let rates = {};
     if (barcodes.length > 0) {
       const rateRes = await pg.query(`
-        SELECT barcode::text, rate
+        SELECT barcode::text, purchase_price
         FROM items
         WHERE barcode = ANY($1)
       `, [barcodes]);
       rateRes.rows.forEach(r => {
-        rates[r.barcode] = Number(r.rate || 0);
+        rates[r.barcode] = Number(r.purchase_price || 0);
       });
     }
 
