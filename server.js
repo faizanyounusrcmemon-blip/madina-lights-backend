@@ -311,72 +311,95 @@ app.get("/api/snapshot-history", async (req, res) => {
 // =====================================================================
 // STOCK REPORT
 // =====================================================================
-app.get("/api/stock-report", async (req, res) => {
+// ===================================
+// STOCK REPORT (SNAPSHOT + LIVE)
+// ===================================
+router.get("/stock-report", async (req, res) => {
   try {
-    const lastSnapRes = await pg.query(`
-      SELECT snap_date 
+    // 1️⃣ Latest snapshot date
+    const snapDateRes = await db.query(`
+      SELECT MAX(snap_date) AS snap_date
       FROM stock_snapshots
-      ORDER BY snap_date DESC
-      LIMIT 1
     `);
 
-    let baseDate = "1900-01-01";
-    if (lastSnapRes.rows.length > 0) baseDate = lastSnapRes.rows[0].snap_date;
+    const snapDate = snapDateRes.rows[0].snap_date;
 
-    const base = await pg.query(`
-      SELECT barcode::text, item_name, SUM(stock_qty) AS qty
-      FROM stock_snapshots
-      WHERE snap_date = $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
+    // 2️⃣ Snapshot stock
+    const snapshotRes = await db.query(`
+      SELECT
+        s.barcode,
+        s.item_name,
+        SUM(s.stock_qty) AS snap_qty
+      FROM stock_snapshots s
+      WHERE s.snap_date = $1
+      GROUP BY s.barcode, s.item_name
+    `, [snapDate]);
 
-    let map = {};
-    base.rows.forEach(r => {
-      map[r.barcode] = { barcode: r.barcode, item_name: r.item_name, stock_qty: Number(r.qty) };
+    // 3️⃣ Live stock after snapshot
+    const liveRes = await db.query(`
+      SELECT
+        l.barcode,
+        SUM(l.in_qty)  AS in_qty,
+        SUM(l.out_qty) AS out_qty
+      FROM stock_ledger l
+      WHERE l.created_at::date > $1
+      GROUP BY l.barcode
+    `, [snapDate]);
+
+    // 4️⃣ Items (rate)
+    const itemsRes = await db.query(`
+      SELECT
+        barcode,
+        item_name,
+        purchase_price
+      FROM items
+    `);
+
+    // =============================
+    // MERGE DATA
+    // =============================
+    const liveMap = {};
+    liveRes.rows.forEach(r => {
+      liveMap[r.barcode] = {
+        in_qty: Number(r.in_qty || 0),
+        out_qty: Number(r.out_qty || 0),
+      };
     });
 
-    const pur = await pg.query(`
-      SELECT barcode::text, item_name, SUM(qty) AS qty
-      FROM purchases
-      WHERE is_deleted = false AND purchase_date > $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
-
-    pur.rows.forEach(r => {
-      if (!map[r.barcode]) map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
-      map[r.barcode].stock_qty += Number(r.qty);
+    const itemsMap = {};
+    itemsRes.rows.forEach(i => {
+      itemsMap[i.barcode] = i;
     });
 
-    const sal = await pg.query(`
-      SELECT barcode::text, item_name, SUM(qty) AS qty
-      FROM sales
-      WHERE is_deleted = false AND sale_date > $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
+    const finalRows = snapshotRes.rows.map(s => {
+      const live = liveMap[s.barcode] || { in_qty: 0, out_qty: 0 };
+      const item = itemsMap[s.barcode] || {};
 
-    sal.rows.forEach(r => {
-      if (!map[r.barcode]) map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
-      map[r.barcode].stock_qty -= Number(r.qty);
+      const stock_qty =
+        Number(s.snap_qty || 0) +
+        Number(live.in_qty || 0) -
+        Number(live.out_qty || 0);
+
+      const rate = Number(item.purchase_price || 0);
+      const amount = stock_qty * rate;
+
+      return {
+        barcode: s.barcode,
+        item_name: s.item_name,
+        stock_qty,
+        rate,
+        amount,
+      };
     });
 
-    const ret = await pg.query(`
-      SELECT barcode::text, item_name, SUM(return_qty) AS qty
-      FROM sale_returns
-      WHERE created_at::date > $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
-
-    ret.rows.forEach(r => {
-      if (!map[r.barcode]) map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
-      map[r.barcode].stock_qty += Number(r.qty);
+    res.json({
+      success: true,
+      snapshot_date: snapDate,
+      rows: finalRows,
     });
 
-    const final = Object.values(map).filter(r => r.stock_qty !== 0);
-    res.json({ success: true, rows: final });
   } catch (err) {
+    console.error("STOCK REPORT ERROR:", err);
     res.json({ success: false, error: err.message });
   }
 });
