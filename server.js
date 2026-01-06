@@ -311,6 +311,7 @@ app.get("/api/snapshot-history", async (req, res) => {
 // =====================================================================
 // STOCK REPORT
 // =====================================================================
+// STOCK REPORT WITH RATE & AMOUNT
 app.get("/api/stock-report", async (req, res) => {
   try {
     const lastSnapRes = await pg.query(`
@@ -323,11 +324,11 @@ app.get("/api/stock-report", async (req, res) => {
     let baseDate = "1900-01-01";
     if (lastSnapRes.rows.length > 0) baseDate = lastSnapRes.rows[0].snap_date;
 
+    // Base stock
     const base = await pg.query(`
-      SELECT barcode::text, item_name, SUM(stock_qty) AS qty
+      SELECT barcode::text, item_name, stock_qty, rate
       FROM stock_snapshots
       WHERE snap_date = $1
-      GROUP BY barcode::text, item_name
     `, [baseDate]);
 
     let map = {};
@@ -335,12 +336,14 @@ app.get("/api/stock-report", async (req, res) => {
       map[r.barcode] = {
         barcode: r.barcode,
         item_name: r.item_name,
-        stock_qty: Number(r.qty)
+        stock_qty: Number(r.stock_qty),
+        rate: Number(r.rate || 0)
       };
     });
 
+    // Purchases
     const pur = await pg.query(`
-      SELECT barcode::text, item_name, SUM(qty) AS qty
+      SELECT barcode::text, item_name, SUM(qty) AS qty, AVG(rate) AS rate
       FROM purchases
       WHERE is_deleted = false AND purchase_date > $1
       GROUP BY barcode::text, item_name
@@ -348,12 +351,13 @@ app.get("/api/stock-report", async (req, res) => {
 
     pur.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0, rate: Number(r.rate || 0) };
       }
-      map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty += Number(r.qty);
+      map[r.barcode].rate = Number(r.rate || map[r.barcode].rate);
     });
 
+    // Sales (reduce stock_qty)
     const sal = await pg.query(`
       SELECT barcode::text, item_name, SUM(qty) AS qty
       FROM sales
@@ -363,12 +367,12 @@ app.get("/api/stock-report", async (req, res) => {
 
     sal.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0, rate: 0 };
       }
-      map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty -= Number(r.qty);
     });
 
+    // Sale Returns
     const ret = await pg.query(`
       SELECT barcode::text, item_name, SUM(return_qty) AS qty
       FROM sale_returns
@@ -378,13 +382,18 @@ app.get("/api/stock-report", async (req, res) => {
 
     ret.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0, rate: 0 };
       }
-      map[r.barcode].item_name = map[r.barcode].item_name || r.item_name;
       map[r.barcode].stock_qty += Number(r.qty);
     });
 
-    const final = Object.values(map).filter(r => r.stock_qty !== 0);
+    // Final array
+    const final = Object.values(map).filter(r => r.stock_qty !== 0)
+      .map(r => ({
+        ...r,
+        amount: r.stock_qty * r.rate
+      }));
+
     res.json({ success: true, rows: final });
 
   } catch (err) {
