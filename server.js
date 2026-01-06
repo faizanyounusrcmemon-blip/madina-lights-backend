@@ -311,9 +311,9 @@ app.get("/api/snapshot-history", async (req, res) => {
 // =====================================================================
 // STOCK REPORT
 // =====================================================================
-// STOCK REPORT WITH RATE & AMOUNT
 app.get("/api/stock-report", async (req, res) => {
   try {
+    // سب سے latest snapshot date
     const lastSnapRes = await pg.query(`
       SELECT snap_date 
       FROM stock_snapshots
@@ -324,11 +324,14 @@ app.get("/api/stock-report", async (req, res) => {
     let baseDate = "1900-01-01";
     if (lastSnapRes.rows.length > 0) baseDate = lastSnapRes.rows[0].snap_date;
 
-    // Base stock
+    // ===============================
+    // Base stock from snapshot
+    // ===============================
     const base = await pg.query(`
-      SELECT barcode::text, item_name, stock_qty, rate
-      FROM stock_snapshots
+      SELECT s.barcode::text, s.item_name, SUM(s.stock_qty) AS stock_qty
+      FROM stock_snapshots s
       WHERE snap_date = $1
+      GROUP BY s.barcode::text, s.item_name
     `, [baseDate]);
 
     let map = {};
@@ -337,13 +340,14 @@ app.get("/api/stock-report", async (req, res) => {
         barcode: r.barcode,
         item_name: r.item_name,
         stock_qty: Number(r.stock_qty),
-        rate: Number(r.rate || 0)
       };
     });
 
+    // ===============================
     // Purchases
+    // ===============================
     const pur = await pg.query(`
-      SELECT barcode::text, item_name, SUM(qty) AS qty, AVG(rate) AS rate
+      SELECT barcode::text, item_name, SUM(qty) AS qty
       FROM purchases
       WHERE is_deleted = false AND purchase_date > $1
       GROUP BY barcode::text, item_name
@@ -351,13 +355,14 @@ app.get("/api/stock-report", async (req, res) => {
 
     pur.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0, rate: Number(r.rate || 0) };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       }
       map[r.barcode].stock_qty += Number(r.qty);
-      map[r.barcode].rate = Number(r.rate || map[r.barcode].rate);
     });
 
-    // Sales (reduce stock_qty)
+    // ===============================
+    // Sales
+    // ===============================
     const sal = await pg.query(`
       SELECT barcode::text, item_name, SUM(qty) AS qty
       FROM sales
@@ -367,12 +372,14 @@ app.get("/api/stock-report", async (req, res) => {
 
     sal.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0, rate: 0 };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       }
       map[r.barcode].stock_qty -= Number(r.qty);
     });
 
+    // ===============================
     // Sale Returns
+    // ===============================
     const ret = await pg.query(`
       SELECT barcode::text, item_name, SUM(return_qty) AS qty
       FROM sale_returns
@@ -382,16 +389,36 @@ app.get("/api/stock-report", async (req, res) => {
 
     ret.rows.forEach(r => {
       if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0, rate: 0 };
+        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
       }
       map[r.barcode].stock_qty += Number(r.qty);
     });
 
-    // Final array
-    const final = Object.values(map).filter(r => r.stock_qty !== 0)
+    // ===============================
+    // Fetch rate from items table
+    // ===============================
+    const barcodes = Object.keys(map);
+    let rates = {};
+    if (barcodes.length > 0) {
+      const rateRes = await pg.query(`
+        SELECT barcode::text, rate
+        FROM items
+        WHERE barcode = ANY($1)
+      `, [barcodes]);
+      rateRes.rows.forEach(r => {
+        rates[r.barcode] = Number(r.rate || 0);
+      });
+    }
+
+    // ===============================
+    // Final array with amount
+    // ===============================
+    const final = Object.values(map)
+      .filter(r => r.stock_qty !== 0)
       .map(r => ({
         ...r,
-        amount: r.stock_qty * r.rate
+        rate: rates[r.barcode] || 0,
+        amount: (rates[r.barcode] || 0) * r.stock_qty
       }));
 
     res.json({ success: true, rows: final });
