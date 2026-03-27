@@ -15,9 +15,13 @@ const supabase = require("./db");
 // --------------------------------------
 // PostgreSQL Connection
 // --------------------------------------
-const pg = new Client({
+const pg = new Pool({
   connectionString: process.env.SUPABASE_DB_URL,
   ssl: { rejectUnauthorized: false },
+
+  max: 10, // max connections
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
 pg.connect()
