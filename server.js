@@ -3,7 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const cron = require("node-cron");
-const { Client } = require("pg");
+const { Pool } = require("pg");
 
 const doBackup = require("./backup");
 const listmlbackups = require("./listmlbackups");
@@ -15,20 +15,25 @@ const supabase = require("./db");
 // --------------------------------------
 // PostgreSQL Connection
 // --------------------------------------
+const { Pool } = require("pg");
+
 const pg = new Pool({
   connectionString: process.env.SUPABASE_DB_URL,
   ssl: { rejectUnauthorized: false },
 
-  max: 10, // max connections
+  max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
 
-pg.connect()
-  .then(() => console.log("✅ PostgreSQL connected"))
-  .catch((err) => console.error("❌ PG Error:", err));
+// optional but recommended
+pg.on("connect", () => {
+  console.log("✅ PostgreSQL Pool connected");
+});
 
-const app = express();
+pg.on("error", (err) => {
+  console.error("🔥 PG Pool Error:", err);
+});
 
 // =====================================================
 // 🔥 SUPER CORS FIX
