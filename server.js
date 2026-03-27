@@ -318,121 +318,92 @@ app.get("/api/snapshot-history", async (req, res) => {
 });
 
 // =====================================================================
-// STOCK REPORT
+// STOCK REPORT (FAST + SERVERLESS SAFE)
 // =====================================================================
 app.get("/api/stock-report", async (req, res) => {
   try {
-    // سب سے latest snapshot date
-    const lastSnapRes = await pg.query(`
-      SELECT snap_date 
-      FROM stock_snapshots
-      ORDER BY snap_date DESC
-      LIMIT 1
+    const result = await pg.query(`
+      WITH last_snap AS (
+        SELECT MAX(snap_date) AS snap_date
+        FROM stock_snapshots
+      ),
+
+      base AS (
+        SELECT 
+          s.barcode::text,
+          s.item_name,
+          SUM(s.stock_qty) AS stock_qty
+        FROM stock_snapshots s, last_snap
+        WHERE s.snap_date = last_snap.snap_date
+        GROUP BY s.barcode::text, s.item_name
+      ),
+
+      purchases_sum AS (
+        SELECT barcode::text, SUM(qty) AS qty
+        FROM purchases, last_snap
+        WHERE is_deleted = false
+          AND purchase_date > COALESCE(last_snap.snap_date,'1900-01-01')
+        GROUP BY barcode::text
+      ),
+
+      sales_sum AS (
+        SELECT barcode::text, SUM(qty) AS qty
+        FROM sales, last_snap
+        WHERE is_deleted = false
+          AND sale_date > COALESCE(last_snap.snap_date,'1900-01-01')
+        GROUP BY barcode::text
+      ),
+
+      returns_sum AS (
+        SELECT barcode::text, SUM(return_qty) AS qty
+        FROM sale_returns, last_snap
+        WHERE created_at::date > COALESCE(last_snap.snap_date,'1900-01-01')
+        GROUP BY barcode::text
+      )
+
+      SELECT 
+        i.barcode::text,
+        i.item_name,
+
+        (
+          COALESCE(b.stock_qty,0)
+          + COALESCE(p.qty,0)
+          - COALESCE(s.qty,0)
+          + COALESCE(r.qty,0)
+        ) AS stock_qty,
+
+        COALESCE(i.purchase_price,0) AS rate,
+
+        (
+          (
+            COALESCE(b.stock_qty,0)
+            + COALESCE(p.qty,0)
+            - COALESCE(s.qty,0)
+            + COALESCE(r.qty,0)
+          ) * COALESCE(i.purchase_price,0)
+        ) AS amount
+
+      FROM items i
+      LEFT JOIN base b ON b.barcode = i.barcode::text
+      LEFT JOIN purchases_sum p ON p.barcode = i.barcode::text
+      LEFT JOIN sales_sum s ON s.barcode = i.barcode::text
+      LEFT JOIN returns_sum r ON r.barcode = i.barcode::text
+
+      WHERE (
+        COALESCE(b.stock_qty,0)
+        + COALESCE(p.qty,0)
+        - COALESCE(s.qty,0)
+        + COALESCE(r.qty,0)
+      ) <> 0
+
+      ORDER BY i.item_name
+      LIMIT 2000
     `);
 
-    let baseDate = "1900-01-01";
-    if (lastSnapRes.rows.length > 0) baseDate = lastSnapRes.rows[0].snap_date;
-
-    // ===============================
-    // Base stock from snapshot
-    // ===============================
-    const base = await pg.query(`
-      SELECT s.barcode::text, s.item_name, SUM(s.stock_qty) AS stock_qty
-      FROM stock_snapshots s
-      WHERE snap_date = $1
-      GROUP BY s.barcode::text, s.item_name
-    `, [baseDate]);
-
-    let map = {};
-    base.rows.forEach(r => {
-      map[r.barcode] = {
-        barcode: r.barcode,
-        item_name: r.item_name,
-        stock_qty: Number(r.stock_qty),
-      };
-    });
-
-    // ===============================
-    // Purchases
-    // ===============================
-    const pur = await pg.query(`
-      SELECT barcode::text, item_name, SUM(qty) AS qty
-      FROM purchases
-      WHERE is_deleted = false AND purchase_date > $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
-
-    pur.rows.forEach(r => {
-      if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      }
-      map[r.barcode].stock_qty += Number(r.qty);
-    });
-
-    // ===============================
-    // Sales
-    // ===============================
-    const sal = await pg.query(`
-      SELECT barcode::text, item_name, SUM(qty) AS qty
-      FROM sales
-      WHERE is_deleted = false AND sale_date > $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
-
-    sal.rows.forEach(r => {
-      if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      }
-      map[r.barcode].stock_qty -= Number(r.qty);
-    });
-
-    // ===============================
-    // Sale Returns
-    // ===============================
-    const ret = await pg.query(`
-      SELECT barcode::text, item_name, SUM(return_qty) AS qty
-      FROM sale_returns
-      WHERE created_at::date > $1
-      GROUP BY barcode::text, item_name
-    `, [baseDate]);
-
-    ret.rows.forEach(r => {
-      if (!map[r.barcode]) {
-        map[r.barcode] = { barcode: r.barcode, item_name: r.item_name ?? "", stock_qty: 0 };
-      }
-      map[r.barcode].stock_qty += Number(r.qty);
-    });
-
-    // ===============================
-    // Fetch purchase_price from items table
-    // ===============================
-    const barcodes = Object.keys(map);
-    let rates = {};
-    if (barcodes.length > 0) {
-      const rateRes = await pg.query(`
-        SELECT barcode::text, purchase_price
-        FROM items
-        WHERE barcode = ANY($1)
-      `, [barcodes]);
-      rateRes.rows.forEach(r => {
-        rates[r.barcode] = Number(r.purchase_price || 0);
-      });
-    }
-
-    // ===============================
-    // Final array with amount
-    // ===============================
-    const final = Object.values(map)
-      .filter(r => r.stock_qty !== 0)
-      .map(r => ({
-        ...r,
-        rate: rates[r.barcode] || 0,
-        amount: (rates[r.barcode] || 0) * r.stock_qty
-      }));
-
-    res.json({ success: true, rows: final });
+    res.json({ success: true, rows: result.rows });
 
   } catch (err) {
+    console.error("❌ STOCK ERROR:", err);
     res.json({ success: false, error: err.message });
   }
 });
