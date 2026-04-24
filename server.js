@@ -1,9 +1,9 @@
 require("dotenv").config();
 const express = require("express");
+const app = express();
 const cors = require("cors");
 const multer = require("multer");
 const cron = require("node-cron");
-const { Pool } = require("pg");
 
 const doBackup = require("./backup");
 const listmlbackups = require("./listmlbackups");
