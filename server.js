@@ -187,10 +187,11 @@ app.get("/api/ping", async (req, res) => {
 // =====================================================================
 const STOCK_SNAPSHOT_SQL = `
 WITH last_snap AS (
-  SELECT MAX(snap_date::date) AS snap_date
+  SELECT MAX(snap_date) AS snap_date
   FROM stock_snapshots
-  WHERE snap_date <= $1
+  WHERE snap_date <= $1::date
 ),
+
 base AS (
   SELECT 
     i.barcode::text AS barcode,
@@ -201,29 +202,33 @@ base AS (
     ON s.barcode::text = i.barcode::text
    AND s.snap_date = (SELECT snap_date FROM last_snap)
 ),
+
 pur AS (
   SELECT barcode::text, SUM(qty) total_purchase
   FROM purchases, last_snap
-  WHERE purchase_date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
-    AND purchase_date <= $1
+  WHERE purchase_date::date > COALESCE(last_snap.snap_date, DATE '1900-01-01')
+    AND purchase_date::date <= $1::date
     AND is_deleted = FALSE
   GROUP BY barcode::text
 ),
+
 sal AS (
   SELECT barcode::text, SUM(qty) total_sale
   FROM sales, last_snap
-  WHERE sale_date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
-    AND sale_date <= $1
+  WHERE sale_date::date > COALESCE(last_snap.snap_date, DATE '1900-01-01')
+    AND sale_date::date <= $1::date
     AND is_deleted = FALSE
   GROUP BY barcode::text
 ),
+
 ret AS (
   SELECT barcode::text, SUM(return_qty) total_return
   FROM sale_returns, last_snap
-  WHERE created_at::date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
-    AND created_at::date <= $1
+  WHERE created_at::date > COALESCE(last_snap.snap_date, DATE '1900-01-01')
+    AND created_at::date <= $1::date
   GROUP BY barcode::text
 )
+
 SELECT 
   b.barcode,
   b.item_name,
@@ -231,6 +236,7 @@ SELECT
   + COALESCE(pur.total_purchase,0)
   - COALESCE(sal.total_sale,0)
   + COALESCE(ret.total_return,0) AS stock_qty
+
 FROM base b
 LEFT JOIN pur ON pur.barcode = b.barcode
 LEFT JOIN sal ON sal.barcode = b.barcode
