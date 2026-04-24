@@ -187,7 +187,7 @@ app.get("/api/ping", async (req, res) => {
 // =====================================================================
 const STOCK_SNAPSHOT_SQL = `
 WITH last_snap AS (
-  SELECT MAX(snap_date) AS snap_date
+  SELECT MAX(snap_date::date) AS snap_date
   FROM stock_snapshots
   WHERE snap_date <= $1
 ),
@@ -204,7 +204,7 @@ base AS (
 pur AS (
   SELECT barcode::text, SUM(qty) total_purchase
   FROM purchases, last_snap
-  WHERE purchase_date > COALESCE(last_snap.snap_date, '1900-01-01'::date)
+  WHERE purchase_date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
     AND purchase_date <= $1
     AND is_deleted = FALSE
   GROUP BY barcode::text
@@ -212,7 +212,7 @@ pur AS (
 sal AS (
   SELECT barcode::text, SUM(qty) total_sale
   FROM sales, last_snap
-  WHERE sale_date > COALESCE(last_snap.snap_date, '1900-01-01'::date)
+  WHERE sale_date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
     AND sale_date <= $1
     AND is_deleted = FALSE
   GROUP BY barcode::text
@@ -220,7 +220,7 @@ sal AS (
 ret AS (
   SELECT barcode::text, SUM(return_qty) total_return
   FROM sale_returns, last_snap
-  WHERE created_at::date > COALESCE(last_snap.snap_date, '1900-01-01'::date)
+  WHERE created_at::date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
     AND created_at::date <= $1
   GROUP BY barcode::text
 )
@@ -324,7 +324,7 @@ app.get("/api/stock-report", async (req, res) => {
   try {
     const result = await pg.query(`
       WITH last_snap AS (
-        SELECT MAX(snap_date) AS snap_date
+        SELECT MAX(snap_date::date) AS snap_date
         FROM stock_snapshots
       ),
 
@@ -342,7 +342,7 @@ app.get("/api/stock-report", async (req, res) => {
         SELECT barcode::text, SUM(qty) AS qty
         FROM purchases, last_snap
         WHERE is_deleted = false
-          AND purchase_date > COALESCE(last_snap.snap_date, '1900-01-01'::date)
+          AND purchase_date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
         GROUP BY barcode::text
       ),
 
@@ -350,14 +350,14 @@ app.get("/api/stock-report", async (req, res) => {
         SELECT barcode::text, SUM(qty) AS qty
         FROM sales, last_snap
         WHERE is_deleted = false
-          AND sale_date > COALESCE(last_snap.snap_date, '1900-01-01'::date)
+          AND sale_date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
         GROUP BY barcode::text
       ),
 
       returns_sum AS (
         SELECT barcode::text, SUM(return_qty) AS qty
         FROM sale_returns, last_snap
-        WHERE created_at::date > COALESCE(last_snap.snap_date, '1900-01-01'::date)
+        WHERE created_at::date > COALESCE(last_snap.snap_date::date, DATE '1900-01-01')
         GROUP BY barcode::text
       )
 
